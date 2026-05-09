@@ -1891,6 +1891,25 @@ async function main() {
 			}
 			const inlineModel = modelFlag[0];
 
+			// Warn when --mode is supplied without --model on a billable generation
+			// mode (image/video). Without --model the canvas picks a bot-default or
+			// first-available model, which has historically routed traffic to the
+			// wrong model and burned credits. Agent mode has no chargeable model.
+			if (inlineMode && !inlineModel && (inlineMode === "image" || inlineMode === "video")) {
+				console.error(
+					`[canvas-cowork] WARNING: submit --mode ${inlineMode} without --model.`,
+				);
+				console.error(
+					`  The canvas will pick a default model (bot default → first available).`,
+				);
+				console.error(
+					`  To control which model runs, pass --model <id> explicitly, or run`,
+				);
+				console.error(
+					`  list-models ${inlineMode} to see the active options.`,
+				);
+			}
+
 			// In parallel mode or when --model is provided, bundle mode+model into
 			// the submit action for atomic execution (no separate set_mode call).
 			// In non-parallel mode without --model, fall back to separate set_mode
@@ -2003,6 +2022,18 @@ async function main() {
 	) {
 		session.activeConvId = (result.data as any).convId;
 		saveSession(session);
+	}
+
+	// Echo the model(s) that actually ran for a submit, so the user/agent can
+	// confirm it matches their intent (especially after --mode without --model).
+	if (
+		action.type === "submit" &&
+		result.type === "result" &&
+		Array.isArray((result.data as any)?.models) &&
+		(result.data as any).models.length > 0
+	) {
+		const models = (result.data as any).models as string[];
+		console.error(`[canvas-cowork] submitted with model(s): ${models.join(", ")}`);
 	}
 
 	console.log(JSON.stringify(result, null, 2));
@@ -2190,8 +2221,14 @@ Commands:
                                     In image mode: used as style reference
                                     In video mode: used as start/end frame
                                     In text mode: multimodal attachment
-                                    --ratio: aspect ratio (e.g. 1:1, 16:9, 9:16, 4:3, 3:4)
-                                    --size: image resolution (e.g. 1024x1024, 1536x1024)
+                                    --ratio: aspect ratio — VALUES ARE MODEL-SPECIFIC.
+                                             Run list-models first and copy a value from the target
+                                             model's supportedAspectRatios verbatim. Formats differ:
+                                               gpt-image-2 → pixel strings ("1024x1024", "3840x2160")
+                                               seedream-5 / gemini / kling → ratio strings ("16:9")
+                                             Passing the wrong format is now rejected up front.
+                                    --size: image resolution from the model's supportedImageSizes
+                                             (e.g. gemini-3-pro-image: "1k" / "2k" / "4k").
                                     --duration: video duration in seconds (e.g. 5, 10)
                                     --loop: loop video (start frame = end frame)
                                     --no-audio: disable audio generation
