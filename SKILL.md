@@ -79,7 +79,7 @@ Use judgment, not ceremony.
 - **Does this feel like a continuation?** `search` for an existing `[Bot]` canvas → `switch` to it. Otherwise `create-canvas`.
 - **Does the request echo past work?** If so, `recall` to find it. If it's clearly fresh ("draw 5 cats"), just start.
 - **Choose mode by intent**: `text` for answers. `image` for visuals. `video` for clips. `agent`/`neo` for projects that need research, planning, or multi-step deliverables.
-- **Default models**: Prefer `seedream-v4.5` for image, `gpt-4.1` for text. Always verify with `list-models <mode>` if unsure what's available — don't guess model names.
+- **Default models**: Bot defaults are `seedream-v4.5` (image) / `gpt-4.1` (text), applied when you call `set-mode` without a model. If the user asks for a specific model, **pass it explicitly** via `--model` or `set-model` — don't rely on the default. Always verify model ids with `list-models <mode>`; don't guess names.
 - **Failure is signal**: `clean-failed`, switch model or simplify, then retry.
 - **Stay in place.** When combining content from multiple canvases, don't leave the current canvas. Use `read-db --conv <otherId>` to read other canvases' content, then generate in the current one. Never create a new canvas just to merge — work where you are.
 - **Navigate, don't open.** To move between your own canvases, use `switch`. `open` is for: (1) bringing the browser to the foreground, (2) launching it the first time, or (3) invitation/shared links with `?` parameters — use `open "<full-url>"` to preserve the auth token. Never extract a conv_id from a shared URL and `switch` to it.
@@ -113,9 +113,16 @@ bun $S --bot claude-code set-mode image && bun $S --bot claude-code submit "a lo
 bun $S --bot claude-code set-mode text && bun $S --bot claude-code submit "write a poem about a loyal dog"
 bun $S --bot claude-code read-db --full
 
-# --- Aspect ratio & resolution ---
+# --- Aspect ratio & resolution (values are MODEL-SPECIFIC, see below) ---
+# seedream-v4.5 has no aspect selector — omit --ratio entirely:
+bun $S --bot claude-code set-model seedream-v4.5
+bun $S --bot claude-code submit "a golden retriever" --wait
+# Ratio-string models (seedream-5 / gemini / kling): use "16:9" etc:
+bun $S --bot claude-code set-model gemini-3.1-flash-image
 bun $S --bot claude-code submit "a golden retriever" --ratio 16:9 --wait
-bun $S --bot claude-code submit "a golden retriever" --size 1536x1024 --wait
+# gpt-image-2 bundles ratio+resolution into a WxH pixel string:
+bun $S --bot claude-code set-model gpt-image-2
+bun $S --bot claude-code submit "a golden retriever" --ratio 3840x2160 --wait
 
 # --- Image-to-image / Image-to-video ---
 bun $S --bot claude-code submit "cyberpunk version" --image ./photo.jpg --wait
@@ -148,7 +155,17 @@ bun $S --bot claude-code recall "cyberpunk logo" --type image
 
 ### Image & Video Generation Flags
 
-Run `list-models image` or `list-models video` first. Pass values exactly as they appear in the model's arrays — formats vary across models.
+**Always run `list-models image` / `list-models video` before passing `--ratio` / `--size`.** The canvas validates these against the active model's `supportedAspectRatios` / `supportedImageSizes` from the global model list and rejects values that aren't on the list — use the exact string from the array.
+
+Formats are model-specific:
+
+| Model family | `supportedAspectRatios` format |
+|---|---|
+| `gpt-image-2` / `gpt-image-1.5` / `gpt-image-1` | **pixel WxH strings** — `"1024x1024"`, `"3840x2160"`, `"2880x2880"`, plus `"auto"` |
+| `seedream-5-*`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, `kling`, `wan`, `veo`, `sora` | **ratio strings** — `"1:1"`, `"16:9"`, `"9:16"`, `"21:9"`, plus sometimes `"auto"` |
+| `seedream-v4.5` | no aspect selector (omit `--ratio`) |
+
+`gpt-image-2` bundles a resolution tier into the same string (`"1024x1024"` = 1K, `"2048x2048"` = 2K, `"2880x2880"` = 4K). Other models sometimes expose a separate `supportedImageSizes` (e.g. `gemini-3-pro-image` → `["1k","2k","4k"]`) — pass via `--size`.
 
 - `--ratio <value>` → from `supportedAspectRatios`
 - `--size <value>` → from `supportedImageSizes`
@@ -156,6 +173,29 @@ Run `list-models image` or `list-models video` first. Pass values exactly as the
 - `--no-audio` → opt out when `supportsAudio: true` (audio is ON by default)
 - `--image` × 2 → start/end keyframes when `supportedKeyframe: true`
 - `--loop` → loop video (start frame = end frame, requires `--image`)
+
+### Choosing a Model
+
+**Always pick a model explicitly.** If you don't, `set-mode` applies a bot default — `seedream-v4.5` for `image`, `gpt-4.1` for `text` — and if that default isn't available on the user's account, falls back to the first model returned for that mode. The bot does NOT inherit the browser user's "preferred model" localStorage (that would silently route your traffic to whatever the user last clicked in the UI — historically this burned credits on gemini-3-pro-image when the user meant gpt-image-2).
+
+Three safe shapes, in order of preference:
+
+```bash
+# 1. Pass --model on submit (atomic; no stale state between set-mode and submit)
+bun $S --bot claude-code submit "..." --mode image --model gpt-image-2 --ratio 3840x2160 --wait
+
+# 2. Set once, reuse across many submits in the same mode
+bun $S --bot claude-code set-mode image
+bun $S --bot claude-code set-model gpt-image-2
+bun $S --bot claude-code submit "..." --ratio 1024x1024 --wait
+
+# 3. Batch with a single model
+bun $S --bot claude-code submit-batch --mode image --models gpt-image-2 "p1" "p2" "p3"
+```
+
+**Do not** call `submit --mode image` repeatedly after already picking a model — every `--mode` replays `set-mode`, which resets `selectedModels` and snaps the pick back to the bot default. Pair `--mode` with `--model` together, or use `set-mode` + `set-model` once up front and then plain `submit`.
+
+If `set-model` or `--model` references a model the user can't access (not in the mode's `availableModels`), the canvas returns an error — surface it to the user instead of retrying with the default.
 
 ### `--wait` Mechanics
 
