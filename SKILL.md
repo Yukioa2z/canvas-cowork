@@ -234,7 +234,7 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 | `set-mode <mode>` | Switch mode (text/image/video/agent/neo) |
 | `set-model <model-id>` | Select model (text/image/video only) |
 | `submit "text" [--follow id] [--mode m] [--model id] [--image ...] [--ratio r] [--size s] [--duration d] [--loop] [--no-audio] [--wait[=sec]]` | Submit a generation |
-| `submit-batch [--follow id] [--mode m] [--models "m1,m2,..."] "p1" "p2" ...` | N submits with optional per-prompt models |
+| `submit-batch [--follow id] [--mode m] [--models "m1,m2,..."] [--ratio r] [--size s] "p1" "p2" ...` | N submits; `--ratio`/`--size` apply to all, `--model` accepted as a single-model alias. Unknown flags now error instead of leaking as prompts. |
 | `read [nodeId \| --all]` | Read node content (browser memory) |
 | `comment <nodeId> "text"` | Move cursor to node + show comment label (30s fade) |
 | `delete <nodeId>` | Delete a node |

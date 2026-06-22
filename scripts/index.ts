@@ -1667,21 +1667,80 @@ async function main() {
 			batchRest0,
 			"--mode",
 		);
-		const { values: modelsBatchFlag, rest: batchRest } = extractFlag(
+		const { values: modelsBatchFlag, rest: batchRest2 } = extractFlag(
 			batchRest1,
 			"--models",
+		);
+		// --model (singular) is a forgiving alias for --models with one model.
+		// Without it, "--model x" leaks the flag value "x" as an extra prompt.
+		const { values: modelBatchFlag, rest: batchRest3 } = extractFlag(
+			batchRest2,
+			"--model",
+		);
+		const { values: ratioBatchFlag, rest: batchRest4 } = extractFlag(
+			batchRest3,
+			"--ratio",
+		);
+		const { values: sizeBatchFlag, rest: batchRest } = extractFlag(
+			batchRest4,
+			"--size",
 		);
 		const follow = followFlag[0];
 		if (follow) assertUUID(follow, "follow nodeId");
 		const batchMode = modesBatchFlag[0]; // e.g. "image"
-		const modelList = modelsBatchFlag[0]?.split(",") || []; // e.g. "gpt-image-1.5,seedream-v4.5"
-		const prompts = batchRest.filter((a) => !a.startsWith("--"));
-		if (!prompts.length) {
+		if (batchMode && !VALID_MODES.has(batchMode)) {
 			console.error(
-				'Error: submit-batch requires at least one prompt.\nUsage: submit-batch [--follow <nodeId>] [--mode <m>] [--models "m1,m2,..."] "prompt1" "prompt2" ...',
+				`Error: invalid mode "${batchMode}". Valid: ${Array.from(VALID_MODES).join(", ")}`,
 			);
 			process.exit(1);
 		}
+		// Accept both --models "a,b" and --model "a"; merge into one list.
+		const modelList = [
+			...(modelsBatchFlag[0]?.split(",") ?? []),
+			...modelBatchFlag,
+		]
+			.map((m) => m.trim())
+			.filter(Boolean); // e.g. ["gpt-image-1.5", "seedream-v4.5"]
+		const aspectRatio = ratioBatchFlag[0];
+		const imageSize = sizeBatchFlag[0];
+
+		// Fail fast on any leftover flag: never silently treat a flag value as a
+		// prompt (historically "--size 2K" leaked "2K" as an extra generation).
+		const unknownFlag = batchRest.find((a) => a.startsWith("--"));
+		if (unknownFlag) {
+			console.error(
+				`Error: submit-batch does not support "${unknownFlag}".\n` +
+					'Supported flags: --follow <nodeId> --mode <m> --models "m1,m2,..." (or --model <m>) --ratio <r> --size <s>',
+			);
+			process.exit(1);
+		}
+		const prompts = batchRest;
+		if (!prompts.length) {
+			console.error(
+				'Error: submit-batch requires at least one prompt.\nUsage: submit-batch [--follow <nodeId>] [--mode <m>] [--models "m1,m2,..."] [--ratio <r>] [--size <s>] "prompt1" "prompt2" ...',
+			);
+			process.exit(1);
+		}
+
+		// Same footgun guard as single submit: image/video without a model lets
+		// the canvas pick a default that has historically misrouted credits.
+		if (
+			batchMode &&
+			modelList.length === 0 &&
+			(batchMode === "image" || batchMode === "video")
+		) {
+			console.error(
+				`[canvas-cowork] WARNING: submit-batch --mode ${batchMode} without --models/--model.`,
+			);
+			console.error(
+				`  The canvas will pick a default model (bot default → first available).`,
+			);
+			console.error(
+				`  Pass --models "<id>" (or --model <id>) to control which model runs;`,
+			);
+			console.error(`  run list-models ${batchMode} to see the active options.`);
+		}
+
 		if (!session.activeConvId) {
 			session.activeConvId = "00000000-0000-0000-0000-000000000000";
 		}
@@ -1723,6 +1782,8 @@ async function main() {
 					...(follow ? { follow } : {}),
 					...(batchMode ? { mode: batchMode } : {}),
 					...(perModel ? { model: perModel } : {}),
+					...(aspectRatio ? { aspectRatio } : {}),
+					...(imageSize ? { imageSize } : {}),
 				});
 				const resp = await sendAndWait(
 					client,
