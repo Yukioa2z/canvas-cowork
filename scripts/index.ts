@@ -1313,6 +1313,9 @@ interface BatchRecord {
 		prompt: string;
 		status: "pending" | "submitted" | "failed";
 		questionNodeId?: string;
+		// Why a failed item failed, so a re-run can tell "rate-limited, retry later"
+		// (rate_limited) apart from a real error and avoid re-submitting blindly.
+		reason?: "rate_limited" | "error";
 	}>;
 }
 
@@ -2017,6 +2020,7 @@ async function main() {
 				});
 				let qid: string | undefined;
 				let ok = false;
+				let failReason: "rate_limited" | "error" = "error";
 				// LOCKED is the frontend's rate-limit signal (>30 actions/10s), not a
 				// real failure — back off and retry instead of dropping the prompt.
 				for (let attempt = 0; attempt <= BATCH_LOCKED_RETRIES; attempt++) {
@@ -2027,17 +2031,19 @@ async function main() {
 							submitAction,
 							ORACLE_TIMEOUT_MS,
 						);
-						if (
-							resp.type === "error" &&
-							(resp as any).code === "LOCKED" &&
-							attempt < BATCH_LOCKED_RETRIES
-						) {
-							const backoff = 4_000 * (attempt + 1);
-							console.error(
-								`  [${i + 1}/${prompts.length}] rate-limited, backing off ${backoff / 1000}s...`,
-							);
-							await new Promise((r) => setTimeout(r, backoff));
-							continue;
+						if (resp.type === "error" && (resp as any).code === "LOCKED") {
+							// Still rate-limited. Retry with backoff while budget remains;
+							// once exhausted, record it as rate_limited (not a hard error)
+							// so a re-run knows it was throttled, not broken.
+							failReason = "rate_limited";
+							if (attempt < BATCH_LOCKED_RETRIES) {
+								const backoff = 4_000 * (attempt + 1);
+								console.error(
+									`  [${i + 1}/${prompts.length}] rate-limited, backing off ${backoff / 1000}s...`,
+								);
+								await new Promise((r) => setTimeout(r, backoff));
+								continue;
+							}
 						}
 						qid =
 							resp.type === "result"
@@ -2046,12 +2052,14 @@ async function main() {
 						ok = resp.type === "result" && (resp.data as any)?.success !== false;
 					} catch (e: any) {
 						// One slow/failed submit shouldn't sink the rest of the batch.
+						failReason = "error";
 						console.error(`  [${i + 1}/${prompts.length}] error: ${e.message}`);
 					}
 					break;
 				}
 				batch.items[i].status = ok ? "submitted" : "failed";
 				batch.items[i].questionNodeId = qid;
+				if (!ok) batch.items[i].reason = failReason;
 				saveBatch(batch);
 				console.error(
 					`  [${i + 1}/${prompts.length}] ${ok ? "✓" : "✗"} ${prompts[i].slice(0, 40)}...`,
@@ -2077,6 +2085,7 @@ async function main() {
 								prompt: it.prompt,
 								questionNodeId: it.questionNodeId,
 								success: it.status === "submitted",
+								...(it.reason ? { reason: it.reason } : {}),
 							})),
 						},
 					},
