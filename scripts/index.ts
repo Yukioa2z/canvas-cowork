@@ -119,6 +119,7 @@ type BotResponse =
 
 const SESSION_DIR = join(homedir(), ".flowith");
 const SESSION_FILE = join(SESSION_DIR, "bot-session.json");
+const BATCH_DIR = join(SESSION_DIR, "batches");
 const SESSION_LOCK_FILE = join(SESSION_DIR, "bot-session.lock");
 const LEGACY_SESSION_FILE = ".flowith-bot-session.json";
 const BOT_EVENTS = { ACTION: "bot_action", RESPONSE: "bot_response" } as const;
@@ -1295,6 +1296,67 @@ function extractFlag(
 	return { values, rest };
 }
 
+// ============ Batch journal (crash/interrupt recovery) ============
+
+interface BatchRecord {
+	batchId: string;
+	convId: string;
+	mode?: string;
+	models: string[];
+	createdAt: string;
+	updatedAt: string;
+	total: number;
+	items: Array<{
+		index: number;
+		prompt: string;
+		status: "pending" | "submitted" | "failed";
+		questionNodeId?: string;
+	}>;
+}
+
+function batchFile(batchId: string): string {
+	return join(BATCH_DIR, `${batchId}.json`);
+}
+
+/** Persist the batch record after every item so an interrupt leaves an audit trail. */
+function saveBatch(rec: BatchRecord) {
+	try {
+		mkdirSync(BATCH_DIR, { recursive: true });
+		rec.updatedAt = new Date().toISOString();
+		writeFileSync(batchFile(rec.batchId), JSON.stringify(rec, null, 2));
+	} catch {}
+}
+
+function loadBatch(batchId: string): BatchRecord | null {
+	try {
+		return JSON.parse(readFileSync(batchFile(batchId), "utf-8")) as BatchRecord;
+	} catch {
+		return null;
+	}
+}
+
+function listBatches(limit = 20): BatchRecord[] {
+	try {
+		const { readdirSync } = require("fs");
+		return (readdirSync(BATCH_DIR) as string[])
+			.filter((f) => f.endsWith(".json"))
+			.map((f) => {
+				try {
+					return JSON.parse(
+						readFileSync(join(BATCH_DIR, f), "utf-8"),
+					) as BatchRecord;
+				} catch {
+					return null;
+				}
+			})
+			.filter((r): r is BatchRecord => r !== null)
+			.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+			.slice(0, limit);
+	} catch {
+		return [];
+	}
+}
+
 // ============ Main ============
 
 async function main() {
@@ -1437,6 +1499,38 @@ async function main() {
 			saveSession(existing);
 		}
 		console.error(`Opened ${target} (new tab)`);
+		return;
+	}
+
+	// ---- batches (file I/O only, no session needed) ----
+	// Audit submit-batch runs after a timeout/interrupt: which prompts landed
+	// as nodes (questionNodeId set) vs. never submitted.
+	if (cmd === "batches") {
+		const id = args.find((a, i) => i > 0 && !a.startsWith("--"));
+		if (id) {
+			const rec = loadBatch(id);
+			if (!rec) {
+				console.log(
+					JSON.stringify({ type: "error", code: "NOT_FOUND", batchId: id }),
+				);
+				process.exit(1);
+			}
+			console.log(JSON.stringify(rec, null, 2));
+		} else {
+			console.log(
+				JSON.stringify(
+					listBatches().map((r) => ({
+						batchId: r.batchId,
+						convId: r.convId,
+						updatedAt: r.updatedAt,
+						submitted: r.items.filter((it) => it.status === "submitted").length,
+						total: r.total,
+					})),
+					null,
+					2,
+				),
+			);
+		}
 		return;
 	}
 
@@ -1820,11 +1914,28 @@ async function main() {
 			await ensureBrowserConnected(client, session, userId, botClient);
 			await client.join(ch);
 
-			const results: Array<{
-				prompt: string;
-				questionNodeId?: string;
-				success: boolean;
-			}> = [];
+			// Journal the batch up front so an interrupt mid-run is recoverable:
+			// each item flips pending → submitted/failed and is persisted as it lands.
+			const batch: BatchRecord = {
+				batchId: crypto.randomUUID(),
+				convId: session.activeConvId!,
+				mode: batchMode,
+				models: modelList,
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+				total: prompts.length,
+				items: prompts.map((prompt, index) => ({
+					index,
+					prompt,
+					status: "pending" as const,
+				})),
+			};
+			saveBatch(batch);
+			console.error(
+				`Batch ${batch.batchId} — ${prompts.length} prompts. ` +
+					`Recover with: batches ${batch.batchId}`,
+			);
+
 			const makeAction = (fields: BotActionPayload): BotAction =>
 				({
 					actionId: crypto.randomUUID(),
@@ -1847,19 +1958,27 @@ async function main() {
 					...(aspectRatio ? { aspectRatio } : {}),
 					...(imageSize ? { imageSize } : {}),
 				});
-				const resp = await sendAndWait(
-					client,
-					ch,
-					submitAction,
-					ORACLE_TIMEOUT_MS,
-				);
-				const qid =
-					resp.type === "result"
-						? (resp.data as any)?.questionNodeId
-						: undefined;
-				const ok =
-					resp.type === "result" && (resp.data as any)?.success !== false;
-				results.push({ prompt: prompts[i], questionNodeId: qid, success: ok });
+				let qid: string | undefined;
+				let ok = false;
+				try {
+					const resp = await sendAndWait(
+						client,
+						ch,
+						submitAction,
+						ORACLE_TIMEOUT_MS,
+					);
+					qid =
+						resp.type === "result"
+							? (resp.data as any)?.questionNodeId
+							: undefined;
+					ok = resp.type === "result" && (resp.data as any)?.success !== false;
+				} catch (e: any) {
+					// One slow/failed submit shouldn't sink the rest of the batch.
+					console.error(`  [${i + 1}/${prompts.length}] error: ${e.message}`);
+				}
+				batch.items[i].status = ok ? "submitted" : "failed";
+				batch.items[i].questionNodeId = qid;
+				saveBatch(batch);
 				console.error(
 					`  [${i + 1}/${prompts.length}] ${ok ? "✓" : "✗"} ${prompts[i].slice(0, 40)}...`,
 				);
@@ -1868,12 +1987,24 @@ async function main() {
 				if (i < prompts.length - 1)
 					await new Promise((r) => setTimeout(r, 500));
 			}
+			const submitted = batch.items.filter(
+				(it) => it.status === "submitted",
+			).length;
 			console.log(
 				JSON.stringify(
 					{
 						type: "result",
 						actionId: crypto.randomUUID(),
-						data: { submitted: results.length, results },
+						data: {
+							batchId: batch.batchId,
+							submitted,
+							total: batch.total,
+							results: batch.items.map((it) => ({
+								prompt: it.prompt,
+								questionNodeId: it.questionNodeId,
+								success: it.status === "submitted",
+							})),
+						},
 					},
 					null,
 					2,
@@ -2376,6 +2507,10 @@ Commands:
                                          --failed: only failed nodes
                                          --conv: read from a different canvas (no switch)
   clean-failed                    Find & delete all failed nodes from database
+
+  batches [batchId]               Audit submit-batch runs (recovery after timeout/interrupt)
+                                         no arg: list recent batches
+                                         batchId: per-prompt status + questionNodeIds
 
   dream-init "theme" [--mode m]   Initialize creative journal (default: image)
 

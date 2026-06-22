@@ -261,6 +261,8 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 | `read-db --failed` | Failed nodes only |
 | `read-db --conv <id> --full` | Read another canvas without switching away |
 | `clean-failed` | Delete failed nodes + orphaned parents |
+| `batches` | List recent `submit-batch` runs (for recovery after a timeout/interrupt) |
+| `batches <batchId>` | Per-prompt status + questionNodeIds for one batch |
 
 ### Memory
 
