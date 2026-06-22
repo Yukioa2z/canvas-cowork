@@ -988,6 +988,31 @@ async function quickPing(
 	}
 }
 
+/**
+ * Read-only liveness probe: is a logged-in Flowith tab actually responding?
+ * Unlike ensureBrowserConnected, this never opens a browser — used by
+ * `status --live` and `login` to report true connection state.
+ */
+async function liveBrowserPing(session: CanvasBotSession): Promise<boolean> {
+	const userId = getJwtUserId(session.accessToken);
+	if (!userId) return false;
+	const client = new RealtimeLite(
+		session.supabaseUrl,
+		session.supabaseKey,
+		session.accessToken,
+	);
+	try {
+		await client.connect();
+		const ch = `bot_ctrl:${userId}`;
+		await client.join(ch);
+		return await quickPing(client, ch, session);
+	} catch {
+		return false;
+	} finally {
+		client.close();
+	}
+}
+
 async function ensureBrowserConnected(
 	client: RealtimeLite,
 	session: CanvasBotSession,
@@ -1290,18 +1315,55 @@ async function main() {
 	const cmd = args[0];
 
 	// ---- status ----
+	// Default: fast, file-only snapshot. --live: also probe the browser tab so
+	// the reported state reflects reality (the file alone can lie mid-login).
 	if (cmd === "status") {
+		const s = loadSession();
+		if (!s) {
+			console.log(JSON.stringify({ status: "no_session" }));
+			return;
+		}
+		const base: Record<string, unknown> = {
+			status: "ok",
+			activeUser: getJwtUserId(s.accessToken) ?? null,
+			activeConvId: s.activeConvId ?? null,
+			expiresAt: s.expiresAt,
+		};
+		if (args.includes("--live")) {
+			const connected = await liveBrowserPing(s);
+			base.browser = connected ? "connected" : "disconnected";
+		}
+		console.log(JSON.stringify(base));
+		return;
+	}
+
+	// ---- whoami: identify the logged-in user without side effects ----
+	if (cmd === "whoami") {
 		const s = loadSession();
 		console.log(
 			JSON.stringify(
 				s
-					? {
-							status: "ok",
-							activeConvId: s.activeConvId ?? null,
-							expiresAt: s.expiresAt,
-						}
-					: { status: "no_session" },
+					? { userId: getJwtUserId(s.accessToken), expiresAt: s.expiresAt }
+					: { userId: null, status: "no_session" },
 			),
+		);
+		return;
+	}
+
+	// ---- login / connect: explicit session handshake (no other side effects) ----
+	// Replaces the old pattern of triggering login as a side effect of
+	// list-models. Establishes (or reuses) a session, then reports browser state.
+	if (cmd === "login" || cmd === "connect") {
+		const s = await acquireSession(botClient);
+		const connected = await liveBrowserPing(s);
+		console.log(
+			JSON.stringify({
+				status: "connected",
+				activeUser: getJwtUserId(s.accessToken),
+				activeConvId: s.activeConvId ?? null,
+				expiresAt: s.expiresAt,
+				browser: connected ? "connected" : "disconnected",
+			}),
 		);
 		return;
 	}
@@ -2264,7 +2326,9 @@ Global:
   --bot <identity>                Set bot cursor identity (claude-code|codex|openclaw|cursor|opencode|flowithos)
 
 Commands:
-  status                          Check session
+  status [--live]                 Check session (--live also probes the browser tab)
+  login | connect                 Establish/reuse a session, report browser state
+  whoami                          Print the logged-in userId (no side effects)
   open [convId]                   Open Flowith in browser
   ping                            Test browser connection
 

@@ -218,6 +218,8 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 
 | Command | What it does |
 |---------|-------------|
+| `login` / `connect` | Establish (or reuse) a session and report browser state. Use this to log in — don't trigger login as a side effect of `list-models`. |
+| `whoami` | Print the logged-in userId (no side effects) |
 | `ping` | Test connection |
 | `create-canvas "title"` | Create canvas + auto-switch (auto-adds `[Bot]` prefix) |
 | `switch <convId>` | Set active canvas |
@@ -225,7 +227,7 @@ bun $S --bot claude-code dream-init "ukiyo-e x cyberpunk"
 | `search "query"` | Search canvases by title |
 | `list-models [mode]` | List available models |
 | `open [convId \| url]` | Open canvas in browser; accepts full URLs for shared/invitation links |
-| `status` | Check session/activeConvId |
+| `status [--live]` | Check session/activeConvId. `--live` also probes the browser tab (file alone can lie mid-login). |
 
 ### Canvas Operations (require canvas page open)
 
