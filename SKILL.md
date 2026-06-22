@@ -204,7 +204,7 @@ Without `--wait`, submit returns immediately — generation runs in background. 
 
 ### `submit` vs `submit-batch` — flag differences
 
-They are NOT interchangeable. `submit-batch` takes **`--models`** (plural, comma-separated), not `--model`. Both forms now reject unknown flags instead of silently turning the flag value into a prompt.
+They are NOT interchangeable. `submit-batch` takes **`--models`** (plural, comma-separated), not `--model`. Both forms now reject unknown flags instead of silently turning the flag value into a prompt. To submit a prompt that legitimately starts with `--`, put everything after a `--` separator: `submit-batch --mode image -- "--retro poster" "another prompt"`.
 
 | Flag | `submit` | `submit-batch` |
 |---|---|---|

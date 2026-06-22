@@ -16,6 +16,7 @@ import {
 	chmodSync,
 	unlinkSync,
 	mkdirSync,
+	renameSync,
 } from "fs";
 import { createServer } from "http";
 import { resolve, join, basename, extname } from "path";
@@ -1319,19 +1320,43 @@ function batchFile(batchId: string): string {
 	return join(BATCH_DIR, `${batchId}.json`);
 }
 
-/** Persist the batch record after every item so an interrupt leaves an audit trail. */
+/**
+ * Persist the batch record after every item so an interrupt leaves an audit
+ * trail. Writes atomically (temp file + rename) so an interrupt mid-write can
+ * never leave a half-written JSON that loadBatch would silently drop. A write
+ * failure is warned (not swallowed) since it means recovery won't be available.
+ */
+let _batchSaveWarned = false;
 function saveBatch(rec: BatchRecord) {
 	try {
 		mkdirSync(BATCH_DIR, { recursive: true });
 		rec.updatedAt = new Date().toISOString();
-		writeFileSync(batchFile(rec.batchId), JSON.stringify(rec, null, 2));
-	} catch {}
+		const dest = batchFile(rec.batchId);
+		const tmp = `${dest}.${process.pid}.tmp`;
+		writeFileSync(tmp, JSON.stringify(rec, null, 2));
+		renameSync(tmp, dest); // atomic on the same filesystem
+	} catch (e: any) {
+		if (!_batchSaveWarned) {
+			_batchSaveWarned = true;
+			console.error(
+				`[canvas-cowork] WARNING: failed to write batch journal (${e?.message ?? e}). ` +
+					`Recovery via 'batches ${rec.batchId}' may be unavailable.`,
+			);
+		}
+	}
 }
 
 function loadBatch(batchId: string): BatchRecord | null {
 	try {
 		return JSON.parse(readFileSync(batchFile(batchId), "utf-8")) as BatchRecord;
-	} catch {
+	} catch (e: any) {
+		// ENOENT is expected (no such batch); anything else means a corrupt or
+		// unreadable journal — surface it so a bad audit isn't mistaken for "none".
+		if (e?.code !== "ENOENT") {
+			console.error(
+				`[canvas-cowork] WARNING: batch journal for ${batchId} is unreadable (${e?.message ?? e}).`,
+			);
+		}
 		return null;
 	}
 }
@@ -1816,8 +1841,18 @@ async function main() {
 
 	// ---- submit-batch: fire N submits over one connection ----
 	if (cmd === "submit-batch") {
+		// POSIX-style "--" separator: everything after the first bare "--" is a
+		// literal prompt, never parsed as a flag. Lets users submit prompts that
+		// legitimately start with "--" (otherwise the unknown-flag guard rejects them).
+		const rawBatchArgs = args.slice(1);
+		const sepIdx = rawBatchArgs.indexOf("--");
+		const flagSegment =
+			sepIdx === -1 ? rawBatchArgs : rawBatchArgs.slice(0, sepIdx);
+		const literalPrompts =
+			sepIdx === -1 ? [] : rawBatchArgs.slice(sepIdx + 1);
+
 		const { values: followFlag, rest: batchRest0 } = extractFlag(
-			args.slice(1),
+			flagSegment,
 			"--follow",
 		);
 		const { values: modesBatchFlag, rest: batchRest1 } = extractFlag(
@@ -1851,6 +1886,13 @@ async function main() {
 			);
 			process.exit(1);
 		}
+		// --model and --models are redundant ways to say the same thing; if both
+		// are given the merge order is non-obvious, so warn rather than guess.
+		if (modelsBatchFlag.length > 0 && modelBatchFlag.length > 0) {
+			console.error(
+				"[canvas-cowork] WARNING: both --models and --model given; merging both (--models first).",
+			);
+		}
 		// Accept both --models "a,b" and --model "a"; merge into one list.
 		const modelList = [
 			...(modelsBatchFlag[0]?.split(",") ?? []),
@@ -1858,20 +1900,34 @@ async function main() {
 		]
 			.map((m) => m.trim())
 			.filter(Boolean); // e.g. ["gpt-image-1.5", "seedream-v4.5"]
+		// A model flag was supplied but resolved to nothing (e.g. --models "" or
+		// --model "  "): that's a usage error, not a silent fall-through to default.
+		if (
+			(modelsBatchFlag.length > 0 || modelBatchFlag.length > 0) &&
+			modelList.length === 0
+		) {
+			console.error(
+				"Error: --models/--model was given but empty. Pass at least one model id, or omit the flag.",
+			);
+			process.exit(1);
+		}
 		const aspectRatio = ratioBatchFlag[0];
 		const imageSize = sizeBatchFlag[0];
 
 		// Fail fast on any leftover flag: never silently treat a flag value as a
 		// prompt (historically "--size 2K" leaked "2K" as an extra generation).
+		// A value-taking flag with no value (e.g. trailing "--ratio") also lands
+		// here, since extractFlag only consumes a following non-flag token.
 		const unknownFlag = batchRest.find((a) => a.startsWith("--"));
 		if (unknownFlag) {
 			console.error(
-				`Error: submit-batch does not support "${unknownFlag}".\n` +
-					'Supported flags: --follow <nodeId> --mode <m> --models "m1,m2,..." (or --model <m>) --ratio <r> --size <s>',
+				`Error: submit-batch does not support "${unknownFlag}" (or it was given without a value).\n` +
+					'Supported flags: --follow <nodeId> --mode <m> --models "m1,m2,..." (or --model <m>) --ratio <r> --size <s>\n' +
+					'To submit a prompt that starts with "--", put it after a "--" separator.',
 			);
 			process.exit(1);
 		}
-		const prompts = batchRest;
+		const prompts = [...batchRest, ...literalPrompts];
 		if (!prompts.length) {
 			console.error(
 				'Error: submit-batch requires at least one prompt.\nUsage: submit-batch [--follow <nodeId>] [--mode <m>] [--models "m1,m2,..."] [--ratio <r>] [--size <s>] "prompt1" "prompt2" ...',
