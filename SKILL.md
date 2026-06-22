@@ -202,6 +202,48 @@ If `set-model` or `--model` references a model the user can't access (not in the
 `--wait` polls via browser broadcast (2s→3s→5s→8s→10s). Default timeout 300s. For video/neo, use `--wait=600`.
 Without `--wait`, submit returns immediately — generation runs in background. Use `read-db` to check later.
 
+### `submit` vs `submit-batch` — flag differences
+
+They are NOT interchangeable. `submit-batch` takes **`--models`** (plural, comma-separated), not `--model`. Both forms now reject unknown flags instead of silently turning the flag value into a prompt.
+
+| Flag | `submit` | `submit-batch` |
+|---|---|---|
+| model | `--model <id>` | `--models "a,b"` (or `--model <id>` as a single-model alias) |
+| mode | `--mode <m>` | `--mode <m>` |
+| ratio / size | `--ratio` / `--size` | `--ratio` / `--size` (applied to every prompt) |
+| follow parent | `--follow <id>` | `--follow <id>` (all prompts branch from it) |
+| image input | `--image <path>` | — (batch is text prompts only) |
+| wait | `--wait[=sec]` | — (batch never waits; audit with `read-db`) |
+
+### Daily batch production cookbook
+
+For "N canvases × M images" runs, do NOT use `--wait` on large batches and do NOT submit one-by-one:
+
+```bash
+# 1. Connect explicitly (don't trigger login via list-models)
+bun $S --bot claude-code login
+
+# 2. Confirm the exact model id + its size/ratio vocabulary
+bun $S --bot claude-code list-models image
+
+# 3. Create the canvas
+bun $S --bot claude-code create-canvas "Day 1 - Topic"
+
+# 4. Submit all prompts in ONE batch with explicit model + size
+bun $S --bot claude-code submit-batch --mode image --models "seedream-v4.5" --size 2K \
+  "prompt1" "prompt2" ... "prompt16"
+#    → prints a batchId; nodes are created fast, generation runs in background
+
+# 5. Audit by reading the canvas, NOT by waiting
+bun $S --bot claude-code read-db --conv <convId> --full
+bun $S --bot claude-code read-db --conv <convId> --failed
+```
+
+Recovery rules:
+- The frontend serializes bot actions and rate-limits at ~30 actions / 10s. `submit-batch` already paces itself and retries on rate-limit, but very large bursts can still be throttled.
+- If a batch times out or is interrupted, read the journal before retrying: `batches` (list) → `batches <batchId>` (per-prompt status). Items with a `questionNodeId` landed; only re-submit the ones that didn't.
+- If `read-db` comes back empty after a timeout, the submit phase likely never started (browser wasn't on the canvas) — re-run, don't assume duplicates.
+
 ## Creative Dream
 
 A persistent creative journal. See `references/creative-dream.md`.

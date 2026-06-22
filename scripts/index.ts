@@ -131,6 +131,7 @@ const BROWSER_OPEN_WAIT_MS = 25_000;
 const BROWSER_POLL_MS = 2_000;
 const BROWSER_OPEN_COOLDOWN_MS = 60_000;
 const BROWSER_MAX_OPENS = 3; // Max auto-opens per session before giving up
+const BATCH_LOCKED_RETRIES = 2; // Retries when the frontend rate-limits a batch submit
 const VALID_MODES = new Set(["text", "image", "video", "agent", "neo"]);
 
 // Input validation
@@ -1960,21 +1961,38 @@ async function main() {
 				});
 				let qid: string | undefined;
 				let ok = false;
-				try {
-					const resp = await sendAndWait(
-						client,
-						ch,
-						submitAction,
-						ORACLE_TIMEOUT_MS,
-					);
-					qid =
-						resp.type === "result"
-							? (resp.data as any)?.questionNodeId
-							: undefined;
-					ok = resp.type === "result" && (resp.data as any)?.success !== false;
-				} catch (e: any) {
-					// One slow/failed submit shouldn't sink the rest of the batch.
-					console.error(`  [${i + 1}/${prompts.length}] error: ${e.message}`);
+				// LOCKED is the frontend's rate-limit signal (>30 actions/10s), not a
+				// real failure — back off and retry instead of dropping the prompt.
+				for (let attempt = 0; attempt <= BATCH_LOCKED_RETRIES; attempt++) {
+					try {
+						const resp = await sendAndWait(
+							client,
+							ch,
+							submitAction,
+							ORACLE_TIMEOUT_MS,
+						);
+						if (
+							resp.type === "error" &&
+							(resp as any).code === "LOCKED" &&
+							attempt < BATCH_LOCKED_RETRIES
+						) {
+							const backoff = 4_000 * (attempt + 1);
+							console.error(
+								`  [${i + 1}/${prompts.length}] rate-limited, backing off ${backoff / 1000}s...`,
+							);
+							await new Promise((r) => setTimeout(r, backoff));
+							continue;
+						}
+						qid =
+							resp.type === "result"
+								? (resp.data as any)?.questionNodeId
+								: undefined;
+						ok = resp.type === "result" && (resp.data as any)?.success !== false;
+					} catch (e: any) {
+						// One slow/failed submit shouldn't sink the rest of the batch.
+						console.error(`  [${i + 1}/${prompts.length}] error: ${e.message}`);
+					}
+					break;
 				}
 				batch.items[i].status = ok ? "submitted" : "failed";
 				batch.items[i].questionNodeId = qid;
